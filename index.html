@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>上市公司地图</title>
+  <style>
+    body, html { margin:0; padding:0; height:100%; }
+    #map { width: 100%; height: 100%; }
+    #panel {
+      position: absolute; top: 10px; left: 10px; z-index: 9999;
+      background: #fff; padding: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+      font-size: 14px; border-radius: 6px;
+    }
+    #file { width: 220px; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <div>导入 Excel：<input id="file" type="file" accept=".xls,.xlsx" /></div>
+    <div style="margin-top:6px;">缩放层级：全国(<=5)、省(6-8)、市(>=9)</div>
+    <div id="status" style="margin-top:6px;color:#666;">未加载数据</div>
+    <div id="list" style="margin-top:6px; max-height:180px; overflow:auto; font-size:13px; line-height:1.4;"></div>
+  </div>
+  <div id="map"></div>
+
+  <!-- 高德地图 JS API -->
+  <script src="https://webapi.amap.com/maps?v=2.0&key=5a37558922eef1fc5e035fde5d709979"></script>
+  <!-- SheetJS 读取 Excel -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <script>
+    // 字段映射：需与 Excel 表头一致
+    const FIELD = {
+      name: '企业名称',
+      province: '所属省份',
+      city: '所属城市',
+      district: '所属区县',
+      lon: '经度',
+      lat: '纬度',
+      address: '注册地址',
+      board: '上市板块',
+      category: '国标行业门类'
+    };
+    const ICON_URL = 'https://webapi.amap.com/theme/v1.3/markers/n/mark_b.png';
+
+    const map = new AMap.Map('map', { zoom: 4, center: [105, 35] });
+    let rawData = [];      // 原始行
+    let markers = [];      // 城市级 marker
+    let statsLayer = null; // 统计图层
+
+    // 读取 Excel
+    document.getElementById('file').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = evt => {
+        const wb = XLSX.read(new Uint8Array(evt.target.result), { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(sheet);
+        rawData = json.map(row => ({
+          name: row[FIELD.name],
+          province: row[FIELD.province],
+          city: row[FIELD.city],
+          district: row[FIELD.district],
+          lon: parseFloat(row[FIELD.lon]),
+          lat: parseFloat(row[FIELD.lat]),
+          address: row[FIELD.address],
+          board: row[FIELD.board],
+          category: row[FIELD.category]
+        })).filter(r => !isNaN(r.lon) && !isNaN(r.lat));
+        document.getElementById('status').innerText = `已加载 ${rawData.length} 条`;
+        renderByZoom();
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // 分级渲染
+    map.on('zoomend', renderByZoom);
+
+    function renderByZoom() {
+      if (!rawData.length) return;
+      clearLayers();
+      renderList([]); // 非市级视图清空列表
+      const z = map.getZoom();
+      if (z <= 5) {
+        renderProvinceStats();
+      } else if (z <= 8) {
+        renderCityStats();
+      } else {
+        renderCompanyMarkers();
+      }
+    }
+
+    function clearLayers() {
+      markers.forEach(m => m.setMap(null));
+      markers = [];
+      if (statsLayer) {
+        statsLayer.setMap(null);
+        statsLayer = null;
+      }
+    }
+
+    // 全国视图：省级统计
+    function renderProvinceStats() {
+      const stat = groupCount(rawData, r => r.province);
+      statsLayer = new AMap.LabelsLayer({ collision: false, zooms: [3, 20] });
+      Object.entries(stat).forEach(([prov, { count, coords }]) => {
+        const pos = centroid(coords);
+        const lbl = new AMap.LabelMarker({
+          position: pos,
+          text: { content: `${prov}：${count}`, direction: 'center', style: { fontSize: 14, fontWeight: 'bold' } },
+          zooms: [3, 20]
+        });
+        statsLayer.add(lbl);
+      });
+      map.add(statsLayer);
+    }
+
+    // 省级视图：城市统计
+    function renderCityStats() {
+      const stat = groupCount(rawData, r => `${r.province}-${r.city}`);
+      statsLayer = new AMap.LabelsLayer({ collision: false, zooms: [3, 20] });
+      Object.entries(stat).forEach(([key, { count, coords }]) => {
+        const [prov, city] = key.split('-');
+        const pos = centroid(coords);
+        const lbl = new AMap.LabelMarker({
+          position: pos,
+          text: { content: `${prov}${city}：${count}`, direction: 'center', style: { fontSize: 13 } },
+          zooms: [3, 20]
+        });
+        statsLayer.add(lbl);
+      });
+      map.add(statsLayer);
+    }
+
+    // 市级视图：公司点位
+    function renderCompanyMarkers() {
+      const bounds = map.getBounds();
+      const dataInView = bounds
+        ? rawData.filter(row => bounds.contains([row.lon, row.lat]))
+        : rawData;
+      dataInView.forEach(row => {
+        const marker = new AMap.Marker({
+          position: [row.lon, row.lat],
+          title: row.name,
+          icon: ICON_URL
+        });
+        const info = new AMap.InfoWindow({
+          content: `
+            <div style="min-width:220px;">
+              <div><b>${row.name}</b></div>
+              <div>省市区：${row.province || ''} ${row.city || ''} ${row.district || ''}</div>
+              <div>地址：${row.address || '—'}</div>
+              <div>国标门类：${row.category || '—'}</div>
+              <div>板块：${row.board || '—'}</div>
+              <div>坐标：${row.lon}, ${row.lat}</div>
+            </div>`
+        });
+        marker.on('mouseover', () => info.open(map, marker.getPosition()));
+        marker.on('mouseout', () => info.close());
+        markers.push(marker);
+      });
+      map.add(markers);
+      document.getElementById('status').innerText = `市级视图：当前视野内 ${dataInView.length} 家企业`;
+      renderList(dataInView);
+    }
+
+    // 辅助：分组计数与质心
+    function groupCount(list, keyFn) {
+      const map = {};
+      list.forEach(r => {
+        const k = keyFn(r);
+        if (!map[k]) map[k] = { count: 0, coords: [] };
+        map[k].count += 1;
+        map[k].coords.push([r.lon, r.lat]);
+      });
+      return map;
+    }
+    function centroid(coords) {
+      const n = coords.length;
+      const sum = coords.reduce((a, c) => [a[0] + c[0], a[1] + c[1]], [0, 0]);
+      return [sum[0] / n, sum[1] / n];
+    }
+
+    // 视野内前 10 家企业列表
+    function renderList(data) {
+      const listDiv = document.getElementById('list');
+      if (!data || !data.length) {
+        listDiv.innerHTML = '';
+        return;
+      }
+      const top10 = data.slice(0, 10);
+      const rows = top10.map((r, idx) =>
+        `<div>${idx + 1}. ${r.name || '—'}（${r.province || ''}${r.city || ''}${r.district || ''}）</div>`
+      ).join('');
+      listDiv.innerHTML = `<div style="font-weight:bold;margin-bottom:4px;">视野内前10家企业：</div>${rows}`;
+    }
+  </script>
+</body>
+</html>
+
