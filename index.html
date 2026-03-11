@@ -47,6 +47,7 @@
     let rawData = [];      // 原始行
     let markers = [];      // 城市级 marker
     let statsLayer = null; // 统计图层
+    let sharedInfoWindow = null; // 共享信息窗口
 
     // 读取 Excel
     document.getElementById('file').addEventListener('change', e => {
@@ -139,14 +140,21 @@
       const dataInView = bounds
         ? rawData.filter(row => bounds.contains([row.lon, row.lat]))
         : rawData;
+      
+      // 初始化共享信息窗口
+      if (!sharedInfoWindow) {
+        sharedInfoWindow = new AMap.InfoWindow({});
+      }
+      
       dataInView.forEach(row => {
         const marker = new AMap.Marker({
           position: [row.lon, row.lat],
           title: row.name,
           icon: ICON_URL
         });
-        const info = new AMap.InfoWindow({
-          content: `
+        
+        marker.on('mouseover', () => {
+          sharedInfoWindow.setContent(`
             <div style="min-width:220px;">
               <div><b>${row.name}</b></div>
               <div>省市区：${row.province || ''} ${row.city || ''} ${row.district || ''}</div>
@@ -154,10 +162,11 @@
               <div>国标门类：${row.category || '—'}</div>
               <div>板块：${row.board || '—'}</div>
               <div>坐标：${row.lon}, ${row.lat}</div>
-            </div>`
+            </div>`);
+          sharedInfoWindow.open(map, marker.getPosition());
         });
-        marker.on('mouseover', () => info.open(map, marker.getPosition()));
-        marker.on('mouseout', () => info.close());
+        
+        marker.on('mouseout', () => sharedInfoWindow.close());
         markers.push(marker);
       });
       map.add(markers);
@@ -167,15 +176,16 @@
 
     // 辅助：分组计数与质心
     function groupCount(list, keyFn) {
-      const map = {};
+      const statistics = {};
       list.forEach(r => {
         const k = keyFn(r);
-        if (!map[k]) map[k] = { count: 0, coords: [] };
-        map[k].count += 1;
-        map[k].coords.push([r.lon, r.lat]);
+        if (!statistics[k]) statistics[k] = { count: 0, coords: [] };
+        statistics[k].count += 1;
+        statistics[k].coords.push([r.lon, r.lat]);
       });
-      return map;
+      return statistics;
     }
+    
     function centroid(coords) {
       const n = coords.length;
       const sum = coords.reduce((a, c) => [a[0] + c[0], a[1] + c[1]], [0, 0]);
@@ -198,4 +208,3 @@
   </script>
 </body>
 </html>
-
